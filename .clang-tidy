@@ -1,0 +1,9 @@
+# Written by `forge lint`; edit freely.
+Checks: >
+  bugprone-*,
+  performance-*,
+  clang-analyzer-*,
+  -bugprone-easily-swappable-parameters
+WarningsAsErrors: ''
+# Header filtering is left to `forge lint`, which scopes diagnostics to
+# this project. Set HeaderFilterRegex here to take over.

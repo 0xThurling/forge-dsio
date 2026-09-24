@@ -1,0 +1,6 @@
+build/
+lib/
+compile_commands.json
+CMakePresets.json
+conanfile.txt
+.config/forge/hot/
