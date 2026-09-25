@@ -19,6 +19,7 @@ struct BatchOptions {
   std::size_t batch_bytes = std::size_t{1} << 20; ///< bytes per callback
   std::size_t prefetch = 2;                       ///< batches read ahead
   std::size_t read_depth = 16; ///< segment reads in flight per shard
+  std::size_t segment_bytes = 0; ///< 0 = the batch size, capped at 256 KiB
   std::uint64_t seed = 0; ///< 0 keeps shard order; else shuffle with fp::Rng
 };
 

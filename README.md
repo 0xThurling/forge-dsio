@@ -32,17 +32,22 @@ forge workspace list # fp + dsio, in dependency order
 | `include/dsio/` | public headers — `#include <dsio/align.hpp>` |
 | `src/` | implementations (compiled library, unlike header-only ForgeML) |
 | `test/` | GoogleTest suites, one per module |
-| `docs/` | [design](docs/README.md) and [roadmap](docs/roadmap.md) |
+| `docs/` | [usage guide](docs/usage.md), [design](docs/README.md), [roadmap](docs/roadmap.md), [ForgeML plan](docs/ml-integration.md) |
 
 ## Status
 
-Stages 0–4 are complete: alignment helpers, `dsio::File` (O_DIRECT open,
+Stages 0–4 are complete, plus the Stage 6 GPU seam (`Sink` / `read_into`,
+cuFile behind a build flag): alignment helpers, `dsio::File` (O_DIRECT open,
 positional I/O, per-file alignment), `fp::AlignedBuffer` (ForgeFP),
-`dsio::DirectReader` (sequential chunks and windows), the async backends
-(`io_uring` + thread-pool fallback, benchmarked at 2.65 GiB/s queued), and the
-dataset pipeline (shards + TSV manifest, `for_each_batch` with bounded
-prefetch and seeded shuffle) — 51/51 tests green on WSL2/ext4. See
-[docs/roadmap.md](docs/roadmap.md) for the numbers and what comes next.
+`dsio::DirectReader` (chunks and windows), the async backends (`io_uring` +
+thread-pool fallback), and the dataset pipeline (shards + TSV manifest,
+`for_each_batch` with backend read-ahead and seeded shuffle). **60/60 tests
+green**, clean under ASan/UBSan and TSan; dataset streaming at 2.75 GiB/s on
+8 × 32 MiB shards and **6.25 GiB/s on 4 × 1 GiB shards** — the vhdx ramps with
+the length of an uninterrupted sequential run (fio: 2.13 / 6.17 GiB/s on the
+same layouts), so shard size is the throughput lever. Run `scripts/bench.sh`
+for the matrix. See [docs/roadmap.md](docs/roadmap.md) for the numbers and
+[docs/ml-integration.md](docs/ml-integration.md) for the ForgeML plan.
 
 ## Requirements
 

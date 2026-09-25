@@ -4,6 +4,10 @@ The implementation spec for **dsio**, a direct storage I/O library for ML data
 pipelines. It is the storage layer under [ForgeML](../../ml/docs/README.md):
 ForgeML decides *what* a batch is, dsio gets the bytes there fast.
 
+**Using the library?** The [usage guide](usage.md) is the practical companion
+to this document: module walkthroughs, examples, the performance guide and
+troubleshooting.
+
 ## Scope
 
 In scope:
@@ -25,6 +29,7 @@ it, never above:
 
 ```
 dataset.hpp    shard streaming + prefetch pipeline         (done)
+sink.hpp       Sink / read_into; the cuFile seam           (seam done)
 shard.hpp      Shard / ShardSet + manifest                 (done)
 mmap.hpp       read-only mappings, madvise hints           (done)
 uring.cpp      io_uring backend + thread-pool fallback     (done)
@@ -70,6 +75,36 @@ semantics stay in dsio.**
 | `fp::io`, `fp::serialize` | manifests and non-direct fallback reads |
 | `fp::bits` | endianness when reading binary headers |
 
+## The GPU seam
+
+Reads land in a `Sink`: a writable region plus what kind of memory it is.
+`HostSink` wraps host memory today; `read_into(file, offset, sink)` fills the
+largest aligned prefix of the region and calls `commit()`. A cuFile build
+(`DSIO_WITH_CUFILE`) adds a device sink: `open_device_sink()` returns one,
+`read_into` dispatches to `cuFileRead`, and callers do not change. Without it,
+`gpu_direct_available()` is false and `open_device_sink()` explains what is
+missing — the same opt-in/fallback shape as `fp::gpu.hpp`. The pipeline can
+adopt device sinks later (a `BatchOptions` sink factory); the seam is in the
+reader today.
+
+## Performance
+
+The pipeline reads each shard through the async backend with a full segment
+pipeline: `read_depth × segment` bytes in flight (about 4 MiB by default;
+`BatchOptions::segment_bytes` overrides the auto size, capped at 256 KiB).
+Batch buffers add `(prefetch + 1) × batch_bytes`, so resident memory is bounded
+and predictable.
+
+Measured here (WSL2/vhdx, O_DIRECT): **2.75 GiB/s** on 8 × 32 MiB shards and
+**6.25 GiB/s** on 4 × 1 GiB shards — the throughput lever is the **length of an
+uninterrupted sequential run**, not the pipeline. The vhdx ramps from ~2.1
+GiB/s (32 MiB runs) to ~6.2 GiB/s (4 GiB runs); four concurrent streams are
+slower than one (4.84 vs 6.25) because they interleave and break the ramp.
+dsio matches fio on every layout. `scripts/bench.sh` runs the matrix; `--fio`
+adds the fio comparison, `--large` the cache-busting pass, `--save`/`--compare`
+track regressions, and `DSIO_BENCH_SHARDS=<dir>` benchmarks another shard
+layout.
+
 ## Decisions (open)
 
 | # | Decision | Outcome |
@@ -79,6 +114,7 @@ semantics stay in dsio.**
 | 3 | Where the block size comes from | per-file `dsio::block_size()` (done), defaulting to 4096; never assume 512 |
 | 4 | Shard alignment in the manifest | shard offsets must be block-aligned; the loader rejects misaligned shards |
 | 5 | io_uring unavailable (old kernel, seccomp, container) | runtime fallback to thread-pool `pread`, reported by `backend_name()` |
+| 6 | Device-memory destination | `Sink` + `read_into`; cuFile behind `DSIO_WITH_CUFILE`, the host path always available |
 
 ## Testing
 
@@ -95,3 +131,5 @@ semantics stay in dsio.**
   tests assert the error, not a signal.
 - Benchmarks (`bench/`, Stage 3+) record GB/s and CPU time. A change that is
   not measured is not an optimization.
+- `forge test --preset sanitize` (ASan+UBSan) and `forge test --preset tsan`
+  are clean; run both before a stage is done.

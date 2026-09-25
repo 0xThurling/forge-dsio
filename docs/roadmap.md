@@ -115,9 +115,11 @@ Files:
       u64, block-aligned offsets, relative paths resolved against the
       manifest), directory discovery
 - [x] `include/dsio/dataset.hpp` + `src/dataset.cpp` — `for_each_batch`: a
-      worker over `fp::Channel` reads `prefetch` batches ahead; batch buffers
-      are reused (bounded at `prefetch + 1`), batches may span shards, only the
-      last is short; `fp::Rng` shuffles the shard order for a nonzero seed
+      worker over `fp::Channel` reads `prefetch` batches ahead, and each shard
+      is read with the async backend (`read_depth` segment reads in flight,
+      completions reordered); batch buffers are reused (bounded at
+      `prefetch + 1`), batches may span shards, only the last is short;
+      `fp::Rng` shuffles the shard order for a nonzero seed
 - [x] `DirectReader::open(path, offset, length)` — a window of a file, for
       shards that start inside one
 - [x] `test/mmap_test.cpp`, `test/shard_test.cpp`, `test/dataset_test.cpp`
@@ -132,7 +134,9 @@ change the stream, buffers are reused (≤ `prefetch + 1`), a seed is
 reproducible, the callback can stop early, a missing shard is an error.
 
 Gate: stream a multi-shard dataset with fixed memory; the bytes match the
-concatenated shards. **Met** — 51/51 tests.
+concatenated shards. **Met** — 60/60 tests. First cut was synchronous
+(30 MiB/s, one block at a time); moving the shard reads onto the async backend
+made it 85× faster (2.76 GiB/s, see the benchmark log).
 
 ## Stage 5 — ForgeML integration
 
@@ -155,26 +159,41 @@ exist yet. dsio Stage 4's reusable byte spans map onto ml's
 **The implementation plan is [ml-integration.md](ml-integration.md)** —
 milestones, API sketch and tests for ForgeML to implement by hand.
 
-## Stage 6 — GPU seam (later, opt-in)
+## Stage 6 — GPU seam (seam landed; cuFile needs a GPU machine)
 
 Files:
 
-- [ ] `include/dsio/sink.hpp` — `Sink` concept: host buffer today, device
-      buffer later, so readers do not care where bytes land
-- [ ] cuFile backend behind a feature flag, with the CPU path always
-      available (same opt-in/fallback shape as `fp::gpu.hpp`)
+- [x] `include/dsio/sink.hpp` + `src/sink.cpp` — `Sink` (`region` / `kind` /
+      `alignment` / `commit`), `HostSink`, `read_into`, `gpu_direct_available()`
+      and `open_device_sink()`
+- [ ] cuFile backend (`DSIO_WITH_CUFILE`): a `DeviceSink` over `cuMemAlloc`
+      and `read_into` dispatching to `cuFileRead`, behind the feature flag, the
+      CPU path always available (same shape as `fp::gpu.hpp`)
+- [x] `test/sink_test.cpp` — the host contract (read into the region, commit,
+      tail, misaligned region, small region) and the clean failure without a
+      device backend
 
 Gate: GPU-read bytes equal the CPU reference on the same shard; the fallback
-still passes every earlier test.
+still passes every earlier test. **Host half met** — 60/60. The device half
+needs an NVIDIA GPU with `nvidia-fs`; WSL2 has no GPUDirect Storage, so the
+backend cannot be built or tested here.
 
 ## Environment notes (this machine)
 
 - WSL2, kernel `6.18.33.1-microsoft-standard-WSL2`; io_uring is not disabled
   (`/proc/sys/kernel/io_uring_disabled = 0`) — still probe at run time and keep
   the fallback first-class.
+- Arch Linux distro; the host disk is a **Samsung 980 PRO 500 GB** (PCIe 4.0,
+  ~7 GB/s rated sequential read) behind a vhdx. The vhdx/virtio path is the
+  real ceiling: fio measures **3.40 GiB/s** on a 256 MiB file and **5.31 GiB/s**
+  on a 24 GiB single pass — dsio reaches 2.89 (single stream) / 5.37 GiB/s.
 - Root filesystem ext4 (`/dev/sdd`, logical block 512, `statfs` 4096); `/tmp`
   is tmpfs, which does **not** support `O_DIRECT`.
-- liburing 2.15 with headers and pkg-config is installed.
+- liburing 2.15 with headers and pkg-config is installed. `/dev/sdd` itself is
+  root-only, so raw-device fio runs need sudo.
+- `fio` is not packaged here (no root): `scripts/bench.sh --fio` takes a source
+  build via `FIO=/path/to/fio` (`git clone https://github.com/axboe/fio`,
+  `./configure && make`).
 - O_DIRECT works here, including short reads at EOF (Stage 1 verified it).
 
 ## How a stage is worked
@@ -182,9 +201,12 @@ still passes every earlier test.
 1. Write the test list first, from the gate.
 2. Implement file by file, in the order listed; run `forge test` after each.
 3. `forge format` and `forge lint` before the stage is done.
-4. Record benchmark numbers for anything hot (Stage 3+); update the table
-   below.
-5. `forge workspace build` at the end of any stage that touches `fp` or `ml`.
+4. `forge test --preset sanitize` and `forge test --preset tsan` before the
+   stage is done (both are clean today; keep them that way).
+5. Record benchmark numbers for anything hot (Stage 3+); update the table
+   below. `scripts/bench.sh` runs the matrix, `--fio` adds the fio ceiling,
+   `--large` the cache-busting pass, `--save`/`--compare` the regression check.
+6. `forge workspace build` at the end of any stage that touches `fp` or `ml`.
 
 ## Benchmark log
 
@@ -202,7 +224,55 @@ still passes every earlier test.
 | 2026-09-24 | 3 | queued 1 MiB, depth 64 | io_uring | 2.65 GiB/s | queue depth still pays |
 | 2026-09-24 | 3 | queued 1 MiB, depth 4 | thread (2 workers) | 2.22 GiB/s | |
 | 2026-09-24 | 3 | queued 1 MiB, depth 64 | thread (2 workers) | 2.27 GiB/s | saturates around depth 4 |
+| 2026-09-24 | 4 | dataset stream, 64 KiB batches | io_uring (depth 16) | 228 MiB/s | small batches stay latency-bound |
+| 2026-09-24 | 4 | dataset stream, 1 MiB batches, prefetch 4 | io_uring (depth 16) | 2.76 GiB/s | 8 × 32 MiB shards |
+| 2026-09-24 | 4 | dataset stream, 8 MiB batches | io_uring (depth 16) | 2.29 GiB/s | |
+| 2026-09-24 | 4 | read-depth sweep 1 / 4 / 16 / 64 | io_uring | 1.40 / 2.45 / 2.49 / 1.30 GiB/s | depth 4–16 is the sweet spot |
+| 2026-09-24 | 4 | mmap scan, one byte per page | mmap | 270 GiB/s | page-cache path, for comparison |
+| 2026-09-25 | — | **fio ceiling**, 256 MiB file, 1 MiB | io_uring depth ≥ 4 | **3.40 GiB/s** | the WSL2/vhdx practical ceiling |
+| 2026-09-25 | — | **fio ceiling**, 24 GiB single cold pass | io_uring depth 32 | **5.31 GiB/s** | large sequential reads go faster |
+| 2026-09-25 | 4 | dataset stream, 1 MiB batches | io_uring | **2.89 GiB/s** | segment 256 KiB × depth 16 (4 MiB in flight) |
+| 2026-09-25 | 4 | dataset, 4 concurrent streams | io_uring | **3.19 GiB/s** | disjoint shards per worker |
+| 2026-09-25 | 4 | dataset, 4 GiB windows of 24 GiB | io_uring | **5.37 GiB/s** | matches fio's 5.31 on the same file |
+| 2026-09-25 | 4 | token packing (copy into u16) | io_uring | 2.80 GiB/s | ~3% over raw streaming |
+| 2026-09-25 | 4 | segment sweep 64K/256K/1M × depth 4/16 | io_uring | best 2.79–2.89 GiB/s | 256K×16 or 1M×4; 4 MiB in flight wins |
+| 2026-09-25 | 4 | **second WSL2 instance**, dataset 1 MiB batches | io_uring | **2.81 / 2.88 GiB/s** (prefetch 1/4) | reproduces instance 1 within 2% |
+| 2026-09-25 | 4 | second instance, 4 concurrent streams | io_uring | **3.22 GiB/s** | idle machine (load 0.03) |
+| 2026-09-25 | 4 | second instance, 24 GiB windows | io_uring | **5.53 GiB/s** | vs 5.37 on instance 1 |
+| 2026-09-25 | — | fio **run-length ramp**: 32 MiB / 128 MiB / 512 MiB / 1 GiB / 4 GiB contiguous | io_uring | 2.1 / 4.3 / 5.6 / 6.0 / 6.2 GiB/s | the vhdx needs a long uninterrupted run to reach full speed |
+| 2026-09-25 | 4 | dsio stream, 4 × **1 GiB** shards | io_uring | **6.25 GiB/s** | 2.3× the 32 MiB-shard layout (2.75) |
+| 2026-09-25 | 4 | dsio stream, 1 GiB shards, 4 workers | io_uring | 4.84 GiB/s | concurrency dilutes the sequential ramp |
+| 2026-09-25 | 4 | fio, 4 GiB single file, after evicting 24 GiB | io_uring | 6.09 GiB/s | the large-run speed is real, not host cache |
+
+**The throughput lever is the dataset layout, not the code.** On this vhdx the
+read path ramps with the length of an uninterrupted sequential run (measured
+with fio and reproduced by dsio end-to-end): 32 MiB shards cap a stream at
+~2.1–2.8 GiB/s, while 512 MiB–1 GiB shards reach 5.6–6.25 GiB/s. dsio matches
+or beats fio on every layout (2.75 vs 2.13 for 32 MiB runs, 6.25 vs 6.17 for
+large ones). Concurrency *hurts* here: four 1 GiB streams (4.84) interleave and
+break each other's ramp. Practical rule: **shards of 512 MiB–1 GiB and one
+reader stream per device**; keep shuffle granularity in mind (shard-level
+shuffle becomes coarse).
+
+Reproducibility: two independent WSL2 instances agree within ~2% on every
+headline number (2.81–2.89 GiB/s shard streaming, 3.19–3.22 concurrent,
+5.37–5.53 large), so the defaults and the harness travel. The spread is mostly
+host-side (load average 0.03 idle vs 4.59 busy).
+
+Tuning rules learned here (now the defaults):
+
+- **In-flight bytes matter, not the request count**: `read_depth × segment`.
+  ~4 MiB is fastest on the 256 MiB shard workload; 16 MiB+ is slower there,
+  though the 24 GiB file tolerates (and rewards) more.
+- **Segments are capped at 256 KiB** by default (`BatchOptions::segment_bytes`
+  overrides): 64 KiB segments starve the pipeline, 1 MiB segments overshoot it
+  at depth 16.
+- **One submit per fill**: a syscall per segment cost ~20%.
+- **Reuse the read buffers across shards**: allocating `read_depth × segment`
+  per shard page-faulted more than the data read (that alone was ~25%).
 
 Takeaway: small sequential O_DIRECT reads are latency-bound (35 MiB/s at
 4 KiB), which is what the queued backends exist for; io_uring scales with
-queue depth, the thread fallback saturates with its two workers.
+queue depth, the thread fallback saturates with its two workers. The dataset
+pipeline reached 2.76 GiB/s once each shard was read through the backend with
+`read_depth` segments in flight — the first, synchronous cut managed 30 MiB/s.

@@ -108,9 +108,13 @@ Tests (`ml/test/shards_test.cpp`):
 
 ## Conventions to follow
 
-- **Shard sizing**: aim for shards of a few thousand records each; dsio
-  shuffles at *shard* granularity, so finer shuffling means smaller shards.
-  Sample-level shuffle stays in ml's in-memory loader.
+- **Shard sizing is a tradeoff**: dsio shuffles at *shard* granularity, so
+  finer shuffling means smaller shards; but on WSL2 the vhdx read path ramps
+  with the length of an uninterrupted sequential run (32 MiB shards ≈
+  2.1–2.8 GiB/s, 512 MiB–1 GiB shards ≈ 5.6–6.25 GiB/s). For a single-stream
+  loader prefer **512 MiB–1 GiB shards**; when you need finer shuffling,
+  shuffle records inside a shard (ml's in-memory loader) instead of making
+  shards tiny.
 - **Memory**: resident bytes ≈ `(prefetch + 1) * batch_bytes`. Start with
   `prefetch = 2`, `batch_bytes = 1 MiB` and tune with the benchmark.
 - **Alignment**: manifest offsets must be multiples of 4096 (dsio validates);

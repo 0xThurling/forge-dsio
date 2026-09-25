@@ -155,9 +155,9 @@ template <bool ThreadOnly> static void BM_QueuedImpl(benchmark::State &state) {
 static void BM_Queued(benchmark::State &state) { BM_QueuedImpl<false>(state); }
 static void BM_QueuedThread(benchmark::State &state) { BM_QueuedImpl<true>(state); }
 
-// Google Benchmark's registration macros build static objects that allocate;
-// the throwing-static check does not apply to them.
-// NOLINTBEGIN(bugprone-throwing-static-initialization)
+// Google Benchmark's registration macros build static objects that allocate and
+// use `__COUNTER__`; neither diagnostic applies to third-party macros.
+// NOLINTBEGIN(bugprone-throwing-static-initialization,clang-diagnostic-c2y-extensions)
 BENCHMARK(BM_Sequential)
     ->Arg(4096)
     ->Arg(65536)
@@ -166,6 +166,6 @@ BENCHMARK(BM_Sequential)
     ->UseRealTime();
 BENCHMARK(BM_Queued)->Arg(1)->Arg(4)->Arg(16)->Arg(64)->UseRealTime();
 BENCHMARK(BM_QueuedThread)->Arg(1)->Arg(4)->Arg(16)->Arg(64)->UseRealTime();
-// NOLINTEND(bugprone-throwing-static-initialization)
+// NOLINTEND(bugprone-throwing-static-initialization,clang-diagnostic-c2y-extensions)
 
 BENCHMARK_MAIN();

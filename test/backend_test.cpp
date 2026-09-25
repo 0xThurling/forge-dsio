@@ -132,13 +132,17 @@ TEST_F(BackendTest, QueueFullIsAnError) {
   auto backend = dsio::open_thread_backend(handle.value().fd(), BackendOptions{2, 2});
   ASSERT_TRUE(backend.is_ok()) << backend.error().message;
 
-  auto buffer = fp::AlignedBuffer::alloc(handle.value().alignment(), handle.value().alignment());
-  ASSERT_TRUE(buffer.is_ok()) << buffer.error();
-
+  // One buffer per request: two reads into the same memory would race.
+  std::vector<fp::AlignedBuffer> buffers;
   std::vector<ReadRequest> requests;
+  buffers.reserve(3);
   requests.reserve(3);
-  for (std::size_t i = 0; i < 3; ++i)
-    requests.push_back(ReadRequest{i * handle.value().alignment(), buffer.value().span(), i});
+  for (std::size_t i = 0; i < 3; ++i) {
+    auto buffer = fp::AlignedBuffer::alloc(handle.value().alignment(), handle.value().alignment());
+    ASSERT_TRUE(buffer.is_ok()) << buffer.error();
+    buffers.push_back(fp::move(buffer.value()));
+    requests.push_back(ReadRequest{i * handle.value().alignment(), buffers.back().span(), i});
+  }
 
   auto too_many = backend.value()->submit(requests);
   EXPECT_FALSE(too_many.is_ok());
