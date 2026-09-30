@@ -2,7 +2,7 @@ return {
     project = {
         name = "dsio",
         type = "library",
-        standard = "20",
+        standard = "23",
         install_headers = true,
     },
     build = {
